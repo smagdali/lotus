@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/docker/go-units"
 	"github.com/ipfs/go-cid"
@@ -20,6 +22,7 @@ import (
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/go-state-types/builtin"
+	"github.com/filecoin-project/go-state-types/builtin/v8/market"
 	miner8 "github.com/filecoin-project/go-state-types/builtin/v8/miner"
 	"github.com/filecoin-project/go-state-types/crypto"
 	power7 "github.com/filecoin-project/specs-actors/v7/actors/builtin/power"
@@ -42,6 +45,7 @@ var minerCmd = &cli.Command{
 		minerFaultsCmd,
 		sendInvalidWindowPoStCmd,
 		generateAndSendConsensusFaultCmd,
+		generateDealWithBadLabelCmd,
 	},
 }
 
@@ -581,4 +585,119 @@ var generateAndSendConsensusFaultCmd = &cli.Command{
 
 		return nil
 	},
+}
+
+var generateDealWithBadLabelCmd = &cli.Command{
+	Name:        "generate-deal-with-bad-label",
+	Description: `Note: This is meant for testing purposes and should NOT be used on mainnet`,
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name:  "actor",
+			Usage: "Specify the address of the miner to run this command",
+		},
+	},
+	Action: func(cctx *cli.Context) error {
+		api, acloser, err := lcli.GetFullNodeAPI(cctx)
+		if err != nil {
+			return xerrors.Errorf("getting chain head: %w", err)
+		}
+		defer acloser()
+
+		ctx := lcli.ReqContext(cctx)
+
+		maddr, err := address.NewFromString(cctx.String("actor"))
+		if err != nil {
+			return xerrors.Errorf("getting actor address: %w", err)
+		}
+
+		spaddr, err := address.NewFromString("t01002")
+		if err != nil {
+			return xerrors.Errorf("getting actor address: %w", err)
+		}
+
+		dealLabel, err := market.NewLabelFromString(string([]byte{0xde, 0xad, 0xbe, 0xef}))
+		if err != nil {
+			return xerrors.Errorf("making new label: %w", err)
+		}
+
+		dummyCid, err := cid.Parse("baga6ea4seaqhvsxnqok5imj2ldwnygzjjbf4vimc3opsrvf5cm5l6" + randSeq(10))
+		if err != nil {
+			return xerrors.Errorf("creating dummy cid: %w", err)
+		}
+
+		proposal := market.DealProposal{
+			PieceCID: dummyCid,
+			Client:   maddr,
+			Provider: spaddr,
+			Label:    dealLabel,
+
+			PieceSize:    128,
+			VerifiedDeal: false,
+
+			StartEpoch: 1104346,
+			EndEpoch:   1704346,
+
+			StoragePricePerEpoch: big.Zero(),
+			ProviderCollateral:   big.Zero(),
+			ClientCollateral:     big.Zero(),
+		}
+
+		proposalBytes := new(bytes.Buffer)
+		err = proposal.MarshalCBOR(proposalBytes)
+		if err != nil {
+			return xerrors.Errorf("marshalling proposal bytes: %w", err)
+		}
+
+		signature, err := api.WalletSign(ctx, maddr, proposalBytes.Bytes())
+		if err != nil {
+			return err
+		}
+
+		serializedParams, err := actors.SerializeParams(&market.PublishStorageDealsParams{
+			Deals: []market.ClientDealProposal{{
+				Proposal:        proposal,
+				ClientSignature: *signature,
+			}},
+		})
+		if err != nil {
+			return xerrors.Errorf("serializing params: %w", err)
+		}
+
+		smsg, err := api.MpoolPushMessage(ctx, &types.Message{
+			To:     builtin.StorageMarketActorAddr,
+			From:   maddr,
+			Value:  types.NewInt(0),
+			Method: builtin.MethodsMarket.PublishStorageDeals,
+			Params: serializedParams,
+		}, nil)
+		if err != nil {
+			return xerrors.Errorf("mpool push: %w", err)
+		}
+
+		fmt.Printf("deal proposal sent in message %s\n", smsg.Cid())
+
+		wait, err := api.StateWaitMsg(ctx, smsg.Cid(), 0)
+		if err != nil {
+			return err
+		}
+
+		// check it executed successfully
+		if wait.Receipt.ExitCode != 0 {
+			fmt.Println(cctx.App.Writer, "Send deal label failed!")
+			return err
+		}
+
+		return nil
+	},
+}
+
+var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randSeq(n int) string {
+	rand.Seed(time.Now().UnixNano())
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
 }
