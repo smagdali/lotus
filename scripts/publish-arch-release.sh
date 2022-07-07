@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+ARCH=$1
+
 pushd bundle
 
 # make sure we have a token set, api requests won't work otherwise
@@ -61,17 +63,28 @@ fi
 RELEASE_UPLOAD_URL=`echo "${RELEASE_RESPONSE}" | jq -r '.upload_url' | cut -d'{' -f1`
 echo "Preparing to send artifacts to ${RELEASE_UPLOAD_URL}"
 
+if [ $ARCH = 'linux' ]; then
 artifacts=(
   "lotus_${CIRCLE_TAG}_linux-amd64.tar.gz"
   "lotus_${CIRCLE_TAG}_linux-amd64.tar.gz.cid"
   "lotus_${CIRCLE_TAG}_linux-amd64.tar.gz.sha512"
+)
+elif [ $ARCH = 'darwin' ]; then
+artifacts=(
   "lotus_${CIRCLE_TAG}_darwin-amd64.tar.gz"
   "lotus_${CIRCLE_TAG}_darwin-amd64.tar.gz.cid"
   "lotus_${CIRCLE_TAG}_darwin-amd64.tar.gz.sha512"
+)
+elif [ $ARCH = 'appimage' ]; then
+artifacts=(
   "Lotus-${CIRCLE_TAG}-x86_64.AppImage"
   "Lotus-${CIRCLE_TAG}-x86_64.AppImage.cid"
   "Lotus-${CIRCLE_TAG}-x86_64.AppImage.sha512"
 )
+else
+  echo "$1 is not a supported architecture to publish a release for" 1>&2
+  exit 1
+fi
 
 for RELEASE_FILE in "${artifacts[@]}"
 do
@@ -99,7 +112,6 @@ do
   echo "Uploading release bundle: ${MISC}"
   curl \
     --request POST \
-    --fail \
     --header "Authorization: token ${GITHUB_TOKEN}" \
     --header "Content-Type: application/octet-stream" \
     --data-binary "@${MISC}" \
